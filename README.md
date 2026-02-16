@@ -39,7 +39,7 @@ A secure, real-time bookmark manager built with **Next.js**, **Supabase**, and *
 
 ```
 Smart Book App/
-├── .env.local.example          # Environment variable template
+├── env.local.example          # Environment variable template
 ├── supabase/
 │   └── migration.sql           # DB schema, RLS policies, Realtime setup
 ├── src/
@@ -145,7 +145,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.bookmarks;
 Copy the example file and fill in your Supabase credentials:
 
 ```bash
-cp .env.local.example .env.local
+cp env.local.example .env.local
 ```
 
 Edit `.env.local`:
