@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { type User } from "@supabase/supabase-js";
 import BookmarkCard from "./BookmarkCard";
@@ -19,6 +19,13 @@ interface DashboardClientProps {
     user: User;
 }
 
+// BroadcastChannel message types for cross-tab sync
+type SyncMessage =
+    | { type: "BOOKMARK_ADDED"; bookmark: Bookmark }
+    | { type: "BOOKMARK_DELETED"; id: string };
+
+const CHANNEL_NAME = "smart-bookmark-sync";
+
 export default function DashboardClient({
     initialBookmarks,
     user,
@@ -33,7 +40,8 @@ export default function DashboardClient({
         type: "success" | "error";
     } | null>(null);
 
-    const supabase = createClient();
+    const [supabase] = useState(() => createClient());
+    const broadcastChannel = useRef<BroadcastChannel | null>(null);
 
     const showToast = useCallback(
         (message: string, type: "success" | "error") => {
@@ -42,7 +50,31 @@ export default function DashboardClient({
         []
     );
 
-    // Realtime subscription
+    // ── Cross-tab sync via BroadcastChannel API ──
+    useEffect(() => {
+        const bc = new BroadcastChannel(CHANNEL_NAME);
+        broadcastChannel.current = bc;
+
+        bc.onmessage = (event: MessageEvent<SyncMessage>) => {
+            const msg = event.data;
+            if (msg.type === "BOOKMARK_ADDED") {
+                setBookmarks((prev) => {
+                    const exists = prev.some((b) => b.id === msg.bookmark.id);
+                    if (exists) return prev;
+                    return [msg.bookmark, ...prev];
+                });
+            } else if (msg.type === "BOOKMARK_DELETED") {
+                setBookmarks((prev) => prev.filter((b) => b.id !== msg.id));
+            }
+        };
+
+        return () => {
+            bc.close();
+            broadcastChannel.current = null;
+        };
+    }, []);
+
+    // ── Supabase Realtime subscription (cross-device sync) ──
     useEffect(() => {
         const channel = supabase
             .channel("bookmarks-realtime")
@@ -52,7 +84,6 @@ export default function DashboardClient({
                     event: "INSERT",
                     schema: "public",
                     table: "bookmarks",
-                    filter: `user_id=eq.${user.id}`,
                 },
                 (payload) => {
                     setBookmarks((prev) => {
@@ -68,7 +99,6 @@ export default function DashboardClient({
                     event: "DELETE",
                     schema: "public",
                     table: "bookmarks",
-                    filter: `user_id=eq.${user.id}`,
                 },
                 (payload) => {
                     setBookmarks((prev) =>
@@ -76,7 +106,14 @@ export default function DashboardClient({
                     );
                 }
             )
-            .subscribe();
+            .subscribe((status) => {
+                if (status === "SUBSCRIBED") {
+                    console.log("Realtime connected!");
+                }
+                if (status === "CHANNEL_ERROR") {
+                    console.error("Realtime connection error.");
+                }
+            });
 
         return () => {
             supabase.removeChannel(channel);
@@ -114,24 +151,35 @@ export default function DashboardClient({
 
         setIsAdding(true);
 
-        const { error } = await supabase.from("bookmarks").insert({
+        const { data, error } = await supabase.from("bookmarks").insert({
             title: title.trim(),
             url: finalUrl,
             user_id: user.id,
-        });
+        }).select().single();
 
         if (error) {
             showToast("Failed to add bookmark", "error");
         } else {
+            const newBookmark = data as Bookmark;
             showToast("Bookmark added!", "success");
+            setBookmarks((prev) => {
+                const exists = prev.some((b) => b.id === newBookmark.id);
+                if (exists) return prev;
+                return [newBookmark, ...prev];
+            });
             setTitle("");
             setUrl("");
+
+            // Broadcast to other tabs
+            broadcastChannel.current?.postMessage({
+                type: "BOOKMARK_ADDED",
+                bookmark: newBookmark,
+            } satisfies SyncMessage);
         }
 
         setIsAdding(false);
     };
 
-    // Delete Bookmark
     const handleDeleteBookmark = async (id: string) => {
         const { error } = await supabase
             .from("bookmarks")
@@ -141,7 +189,14 @@ export default function DashboardClient({
         if (error) {
             showToast("Failed to delete bookmark", "error");
         } else {
+            setBookmarks((prev) => prev.filter((b) => b.id !== id));
             showToast("Bookmark deleted", "success");
+
+            // Broadcast to other tabs
+            broadcastChannel.current?.postMessage({
+                type: "BOOKMARK_DELETED",
+                id,
+            } satisfies SyncMessage);
         }
     };
 
